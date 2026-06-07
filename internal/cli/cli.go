@@ -16,7 +16,7 @@ func Run() error {
 
 	cmd := &cli.Command{
 		Name:   "dnsaur",
-		Usage:  "Forwarding dns server with ad-blocking.",
+		Usage:  "Forwarding DNS server with ad-blocking.",
 		Action: start,
 
 		Flags: []cli.Flag{

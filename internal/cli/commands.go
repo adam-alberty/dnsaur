@@ -10,7 +10,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-// Runs a server
+// Runs a server.
 func start(ctx context.Context, cmd *cli.Command) error {
 	configPath := cmd.String("config")
 
@@ -19,11 +19,10 @@ func start(ctx context.Context, cmd *cli.Command) error {
 	if err != nil {
 		return err
 	}
+	slog.Info("loaded config", "config_path", configPath)
 
 	// set up logger
 	logging.SetupLogger(cfg.Logging)
-
-	slog.Info("loaded config", "config_path", configPath)
 
 	server, err := server.NewServer(cfg)
 	if err != nil {

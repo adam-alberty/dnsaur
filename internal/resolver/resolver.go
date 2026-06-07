@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"sync/atomic"
+	"net/url"
 	"time"
 
 	"codeberg.org/miekg/dns"
@@ -12,46 +12,38 @@ import (
 	"github.com/adam-alberty/dnsaur/internal/blocklist"
 	"github.com/adam-alberty/dnsaur/internal/cache"
 	"github.com/adam-alberty/dnsaur/internal/config"
+	"github.com/adam-alberty/dnsaur/internal/upstream"
 )
 
 type Resolver struct {
-	// config
-	cfg *config.Config
-	// cache
-	cache *cache.Cache
-	// upstream
-	nextUpstreamIdx atomic.Uint64
-	// blocklist
-	bl *blocklist.BlockList
+	upstream  *upstream.Upstream
+	cache     *cache.Cache
+	blocklist *blocklist.BlockList
+	client    *dns.Client
 }
 
 func New(cfg *config.Config) (*Resolver, error) {
-	if !cfg.Blocking.Enabled {
-		slog.Warn("domain blocking is disabled")
+	blocklist, err := blocklist.Load(cfg.Blocking.Enabled, cfg.Blocking.Lists)
+	if err != nil {
+		return nil, err
 	}
 
-	// Set up blocklist
-	bl := blocklist.New()
-	for _, source := range cfg.Blocking.Lists {
-		count, err := bl.Add(source)
-		if err != nil {
-			return nil, err
-		}
-		slog.Info("loaded blocklist", "source", source, slog.Int("domain_count", count))
+	urls := make([]url.URL, 0, len(cfg.Upstream.Addresses))
+	for _, u := range cfg.Upstream.Addresses {
+		urls = append(urls, *u.URL)
+	}
+	upstream, err := upstream.New(urls, time.Duration(cfg.Upstream.TimeoutMs)*time.Millisecond)
+	if err != nil {
+		return nil, err
 	}
 
 	resolver := Resolver{
-		cfg:   cfg,
-		bl:    bl,
-		cache: cache.New(),
+		upstream:  upstream,
+		blocklist: blocklist,
+		cache:     cache.New(cfg.Cache.Enabled),
+		client:    dns.NewClient(),
 	}
 	return &resolver, nil
-}
-
-func (r *Resolver) nextUpstream() config.Upstream {
-	upstreams := r.cfg.Upstream
-	idx := r.nextUpstreamIdx.Add(1)
-	return upstreams[idx%uint64(len(upstreams))]
 }
 
 func (resolver *Resolver) HandleDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
@@ -69,31 +61,30 @@ func (resolver *Resolver) HandleDNS(ctx context.Context, w dns.ResponseWriter, r
 		return
 	}
 
-	key := cache.Key(m.Question[0])
+	if resolver.cache.IsEnabled() {
+		key := cache.Key(m.Question[0])
 
-	// look up cache
-	if cached, ok := resolver.cache.Get(key); ok {
-		slog.Debug("cache hit", "domain", m.Question[0].Header().Name)
-		cached.ID = m.ID
-		cached.Pack()
-		io.Copy(w, cached)
+		// look up cache
+		if cached, ok := resolver.cache.Get(key); ok {
+			slog.Debug("cache hit", "domain", m.Question[0].Header().Name)
+			cached.ID = m.ID
+			cached.Pack()
+			io.Copy(w, cached)
 
-		return
+			return
+		}
 	}
 
 	// check blocklist
-	if resolver.cfg.Blocking.Enabled {
+	if resolver.blocklist.IsEnabled() {
 		for _, q := range m.Question {
-			// check if blocked
-			if resolver.bl.Contains(q.Header().Name) {
+			if resolver.blocklist.Contains(q.Header().Name) {
 				slog.Debug("domain blocked", "domain", q.Header().Name)
-
 				dnsutil.SetReply(m, r)
 				m.Answer = nil
 				m.Rcode = dns.RcodeNameError
 				m.Authoritative = true
 				m.Pack()
-
 				io.Copy(w, m)
 
 				return
@@ -101,16 +92,11 @@ func (resolver *Resolver) HandleDNS(ctx context.Context, w dns.ResponseWriter, r
 		}
 	}
 
-	// get reply from upstream
-	// TODO reuse clients between requests
-	client := dns.NewClient()
-
-	upstream := resolver.nextUpstream()
-
-	queryCtx, cancel := context.WithTimeout(ctx, time.Duration(upstream.TimeoutMs)*time.Millisecond)
+	upstream := resolver.upstream.Next()
+	queryCtx, cancel := context.WithTimeout(ctx, resolver.upstream.GetTimeout())
 	defer cancel()
 
-	upstreamResponse, duration, err := client.Exchange(queryCtx, m, upstream.Address.URL.Scheme, upstream.Address.URL.Host)
+	upstreamResponse, duration, err := resolver.client.Exchange(queryCtx, m, upstream.Scheme, upstream.Host)
 	if err != nil {
 		slog.Error("invalid upstream reply", "err", err)
 		dnsutil.SetReply(m, r)
@@ -120,17 +106,22 @@ func (resolver *Resolver) HandleDNS(ctx context.Context, w dns.ResponseWriter, r
 
 		return
 	}
-	slog.Debug("fetching reply", slog.String("domain", m.Question[0].Header().Name), slog.String("upstream_url", upstream.Address.URL.String()), slog.Duration("duration", duration))
+	slog.Debug("fetched reply from upstream", slog.String("domain", m.Question[0].Header().Name), slog.String("upstream_url", upstream.String()), slog.Duration("duration", duration))
 
-	// cache the response
-	slog.Debug("caching upstream response", "domain", m.Question[0].Header().Name)
-	resolver.cache.Set(
-		key,
-		upstreamResponse,
-		time.Duration(minTTL(upstreamResponse))*time.Second,
-	)
+	if resolver.cache.IsEnabled() {
+		key := cache.Key(m.Question[0])
+		// cache the response
+		slog.Debug("caching upstream response", "domain", m.Question[0].Header().Name)
+		resolver.cache.Set(
+			key,
+			upstreamResponse,
+			time.Duration(minTTL(upstreamResponse))*time.Second,
+		)
+
+	}
 
 	io.Copy(w, upstreamResponse)
+
 }
 
 func minTTL(msg *dns.Msg) uint32 {

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -8,14 +9,16 @@ import (
 	"codeberg.org/miekg/dns"
 )
 
+// Stores cached DNS responses.
+type Cache struct {
+	enabled bool
+	mu      sync.RWMutex
+	entries map[CacheKey]Entry
+}
+
 type Entry struct {
 	Msg       *dns.Msg
 	ExpiresAt time.Time
-}
-
-type Cache struct {
-	mu      sync.RWMutex
-	entries map[CacheKey]Entry
 }
 
 type CacheKey struct {
@@ -24,10 +27,19 @@ type CacheKey struct {
 	Class uint16
 }
 
-func New() *Cache {
+func New(enabled bool) *Cache {
+	if !enabled {
+		slog.Warn("cache is not enabled")
+	}
+
 	return &Cache{
 		entries: make(map[CacheKey]Entry),
+		enabled: enabled,
 	}
+}
+
+func (c *Cache) IsEnabled() bool {
+	return c.enabled
 }
 
 // Adds entry to cache.

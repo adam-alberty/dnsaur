@@ -13,7 +13,7 @@ type Config struct {
 	Logging  LoggingConfig  `toml:"logging"`
 	Cache    CacheConfig    `toml:"cache"`
 	Blocking BlockingConfig `toml:"blocking"`
-	Upstream []Upstream     `toml:"upstream"`
+	Upstream Upstream       `toml:"upstream"`
 }
 
 type ServerConfig struct {
@@ -37,8 +37,8 @@ type BlockingConfig struct {
 }
 
 type Upstream struct {
-	Address   UpstreamAddress `toml:"address"`
-	TimeoutMs int             `toml:"timeout_ms"`
+	Addresses []UpstreamAddress `toml:"addresses"`
+	TimeoutMs int               `toml:"timeout_ms"`
 }
 
 type UpstreamAddress struct {
